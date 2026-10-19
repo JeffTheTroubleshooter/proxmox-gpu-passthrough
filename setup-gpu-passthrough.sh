@@ -7,7 +7,7 @@
 #
 # Usage:
 #   bash setup-gpu-passthrough.sh            # setup (asks for VM)
-#   bash setup-gpu-passthrough.sh --remove   # remove GPU from VM + delete mapping
+#   bash setup-gpu-passthrough.sh --remove   # FULL remove (VM + mapping + vfio + initramfs)
 #   bash setup-gpu-passthrough.sh --check    # checks only
 # =============================================================================
 set -euo pipefail
@@ -36,10 +36,13 @@ command -v pveversion >/dev/null || { echo "Not a Proxmox host."; exit 1; }
 NODE=$(hostname)
 
 # =============================================================================
-# REMOVE MODE
+# FULL REMOVE MODE
 # =============================================================================
 if [ "$REMOVE" -eq 1 ]; then
-  say "REMOVE GPU PASSTHROUGH"
+  say "FULL REMOVE GPU PASSTHROUGH"
+  echo "This will detach the GPU from a VM, delete the mapping, remove vfio config,"
+  echo "and rebuild initramfs so the GPU returns to the host after reboot."
+  echo
   echo "Existing VMs:"
   qm list | awk 'NR>1 {printf "  %s  %s\n", $1, $2}'
   echo
@@ -56,11 +59,34 @@ if [ "$REMOVE" -eq 1 ]; then
       warn "VM $VMID does not exist"
     fi
   fi
+
   if ask "Delete PCI mapping '$MAP_ID'?"; then
     pvesh delete /cluster/mapping/pci/$MAP_ID 2>/dev/null && ok "Mapping deleted" || warn "Mapping did not exist"
   fi
-  say "Remove finished"
-  echo "Stop/start the VM if it was running. Reboot the host only if you also want to unbind vfio."
+
+  if ask "Remove vfio.conf and blacklist?"; then
+    rm -f /etc/modprobe.d/vfio.conf /etc/modprobe.d/blacklist-gpu-host.conf
+    ok "Removed vfio.conf and blacklist"
+  fi
+
+  if ask "Remove vfio modules from /etc/modules?"; then
+    sed -i '/^vfio$/d;/^vfio_iommu_type1$/d;/^vfio_pci$/d' /etc/modules
+    ok "Removed vfio lines from /etc/modules"
+  fi
+
+  if ask "Rebuild initramfs + update bootloader (required for full unbind on next boot)?"; then
+    update-initramfs -u -k all
+    if [ -f /etc/kernel/proxmox-boot-uuids ]; then
+      proxmox-boot-tool refresh
+    else
+      update-grub
+    fi
+    ok "initramfs rebuilt"
+  fi
+
+  say "Full remove finished"
+  echo "Reboot the host for the GPU to return to the normal drivers."
+  echo "After reboot check: lspci -nnk -s 0000:01:00  (should no longer show vfio-pci)"
   exit 0
 fi
 
