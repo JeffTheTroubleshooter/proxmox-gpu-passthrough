@@ -1,17 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# setup-gpu-passthrough.sh  -  Proxmox VE GPU passthrough setup (with pre-checks)
-# Written by Prox for Jeffrey, 2026-10-17. Updated 2026-10-18 after clean reinstall.
-# Tested on: i7-9700F (no iGPU), RTX 2060 SUPER, PVE 9.2, kernel 7.0.14-23-pve,
-# VM "jex-server" (Ubuntu 26.04 + Ollama).
-#
-# ALWAYS run the checks first (especially for a video):
-#   bash setup-gpu-passthrough.sh --check          # full read-only verification
-#   bash setup-gpu-passthrough.sh                  # checks, then asks before every change
-#   bash setup-gpu-passthrough.sh --vm 102         # same + configure VM 102
-#   bash setup-gpu-passthrough.sh --force          # ignore critical check failures
-#
-# It never reboots by itself.
+# setup-gpu-passthrough.sh  -  Proxmox VE GPU passthrough
+# Pre-checks first, then asks to continue, then optionally pick a VM.
+# Forces any leftover GPU functions onto vfio-pci.
+# Never reboots.
 # =============================================================================
 set -euo pipefail
 
@@ -22,7 +14,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1 ;;
     --vm) VMID="$2"; shift ;;
     --map-id) MAP_ID="$2"; shift ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac; shift
 done
@@ -34,44 +26,40 @@ fail(){ printf '   \033[31m[FAIL]\033[0m %s\n' "$*"; }
 ask(){ [ "$CHECK_ONLY" = 1 ] && return 1; read -r -p "   $1 [y/N] " a; [[ "$a" =~ ^[Yy] ]]; }
 
 CRITICAL=0
-[ "$(id -u)" = 0 ] || { echo "Must run as root on the Proxmox host."; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "Must run as root."; exit 1; }
 command -v pveversion >/dev/null || { echo "Not a Proxmox host."; exit 1; }
 NODE=$(hostname)
 
 # =============================================================================
-# PRE-CHECKS (always run, never change anything)
+# PRE-CHECKS
 # =============================================================================
 say "PRE-CHECKS (read-only)"
 
-# 1. CPU / IOMMU capability
 CPU_VENDOR=$(awk -F: '/vendor_id/ {gsub(/ /,"",$2); print $2; exit}' /proc/cpuinfo)
 if [ "$CPU_VENDOR" = "GenuineIntel" ]; then
   IOMMU_OPTS="intel_iommu=on iommu=pt"
-  ok "Intel CPU detected"
+  ok "Intel CPU"
 elif [ "$CPU_VENDOR" = "AuthenticAMD" ]; then
   IOMMU_OPTS="iommu=pt"
-  ok "AMD CPU detected"
+  ok "AMD CPU"
 else
-  fail "Unknown CPU vendor: $CPU_VENDOR"; CRITICAL=1
+  fail "Unknown CPU"; CRITICAL=1
 fi
 
-# 2. IOMMU currently active?
 if [ -d /sys/kernel/iommu_groups ] && [ "$(ls /sys/kernel/iommu_groups 2>/dev/null | wc -l)" -gt 0 ]; then
-  ok "IOMMU is active ($(ls /sys/kernel/iommu_groups | wc -l) groups)"
+  ok "IOMMU active ($(ls /sys/kernel/iommu_groups | wc -l) groups)"
 else
-  fail "IOMMU is NOT active. Enable VT-d / AMD-Vi in BIOS and add $IOMMU_OPTS to kernel cmdline."
+  fail "IOMMU not active. Enable VT-d/AMD-Vi in BIOS + add $IOMMU_OPTS"
   CRITICAL=1
 fi
 
-# 3. Find GPU
 if [ -z "${GPU_SLOT:-}" ]; then
   GPU_SLOT=$(lspci -Dnn | awk '/\[10de:/ && /VGA|3D/ {print $1; exit}' | sed 's/\.[0-9]$//' || true)
 fi
 if [ -z "$GPU_SLOT" ]; then
-  fail "No NVIDIA GPU found."
-  CRITICAL=1
+  fail "No NVIDIA GPU found"; CRITICAL=1
 else
-  ok "NVIDIA GPU found at $GPU_SLOT"
+  ok "NVIDIA GPU at $GPU_SLOT"
   mapfile -t FUNCS < <(lspci -Dnn -s "$GPU_SLOT" | awk '{print $1}')
   IDS=""
   for f in "${FUNCS[@]}"; do
@@ -84,94 +72,77 @@ else
   MAIN="${FUNCS[0]}"
   VGA_ID=$(lspci -n -s "$MAIN" | awk '{print $3}')
   GROUP=$(basename "$(readlink -f /sys/bus/pci/devices/$MAIN/iommu_group)" 2>/dev/null || echo "")
-  ok "GPU functions: ${#FUNCS[@]}  |  vfio ids: $IDS"
+  ok "GPU functions: ${#FUNCS[@]} | ids: $IDS"
 fi
 
-# 4. IOMMU group isolation
 if [ -n "${GROUP:-}" ]; then
-  DEVS_IN_GROUP=$(ls /sys/kernel/iommu_groups/$GROUP/devices 2>/dev/null | wc -l)
-  if [ "$DEVS_IN_GROUP" -le 4 ]; then
-    ok "GPU IOMMU group $GROUP looks isolated ($DEVS_IN_GROUP devices)"
+  DEVS=$(ls /sys/kernel/iommu_groups/$GROUP/devices 2>/dev/null | wc -l)
+  if [ "$DEVS" -le 4 ]; then
+    ok "GPU group $GROUP looks isolated ($DEVS devices)"
   else
-    warn "GPU shares IOMMU group $GROUP with $DEVS_IN_GROUP devices. ACS override may be needed."
+    warn "GPU shares group $GROUP with $DEVS devices"
   fi
 fi
 
-# 5. Host NVIDIA packages (must be absent)
 NV_PKGS=$(dpkg -l 2>/dev/null | awk '/^i/ && /nvidia|libcuda1|libnvcuvid1/ {print $2}' | grep -v pve-nvidia-vgpu-helper || true)
 if [ -n "$NV_PKGS" ]; then
-  fail "Host has NVIDIA packages installed (will break passthrough and kernel updates):"
+  fail "Host NVIDIA packages found (must be removed):"
   echo "$NV_PKGS" | sed 's/^/       /'
   CRITICAL=1
 else
-  ok "No NVIDIA packages on the host"
+  ok "No NVIDIA packages on host"
 fi
 
-# 6. Memory headroom
-MEM_TOTAL_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
 MEM_AVAIL_KB=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
-MEM_TOTAL_GB=$((MEM_TOTAL_KB / 1024 / 1024))
-MEM_AVAIL_GB=$((MEM_AVAIL_KB / 1024 / 1024))
 if [ "$MEM_AVAIL_KB" -gt $((VM_MEM * 1024 * 2)) ]; then
-  ok "Enough free RAM (${MEM_AVAIL_GB}G available, VM will pin ${VM_MEM}MB)"
+  ok "Enough free RAM for ${VM_MEM}MB VM"
 else
-  warn "Low free RAM (${MEM_AVAIL_GB}G). Passthrough VM pins all memory."
+  warn "Low free RAM"
 fi
 
-# 7. Bootloader type
-if [ -f /etc/kernel/cmdline ]; then
-  ok "Using systemd-boot (/etc/kernel/cmdline)"
-  BOOTFILE=/etc/kernel/cmdline
-else
-  ok "Using GRUB (/etc/default/grub)"
-  BOOTFILE=/etc/default/grub
-fi
-
-# Summary of checks
 echo
 if [ "$CRITICAL" -eq 1 ] && [ "$FORCE" -eq 0 ]; then
-  fail "CRITICAL checks failed. Fix the issues above (especially IOMMU and host NVIDIA packages) then re-run."
-  echo "   Use --force only if you understand the risk."
+  fail "Critical checks failed. Fix them or use --force."
   exit 1
 fi
+
 if [ "$CHECK_ONLY" -eq 1 ]; then
-  ok "All critical checks passed. Safe to proceed with changes when ready."
+  ok "Checks finished. No changes made."
   exit 0
 fi
-ok "Pre-checks finished. Proceeding to configuration (will ask before every change)."
+
+# Explicit continue prompt
+echo
+read -r -p "Checks done. Continue and apply changes? [y/N] " CONTINUE
+[[ "$CONTINUE" =~ ^[Yy] ]] || { echo "Aborted."; exit 0; }
 
 # =============================================================================
-# CONFIGURATION (only if checks passed or --force)
+# APPLY CHANGES
 # =============================================================================
+say "Applying configuration"
 
-# IOMMU cmdline
-say "Kernel command line"
+# IOMMU
 if [ -f /etc/kernel/cmdline ]; then
   if ! grep -q "iommu=pt" /etc/kernel/cmdline; then
-    ask "Add '$IOMMU_OPTS' to /etc/kernel/cmdline?" && sed -i "1 s/\$/ $IOMMU_OPTS/" /etc/kernel/cmdline
-  else
-    ok "IOMMU options already present"
-  fi
+    ask "Add IOMMU options to /etc/kernel/cmdline?" && sed -i "1 s/$/ $IOMMU_OPTS/" /etc/kernel/cmdline
+  else ok "IOMMU already in cmdline"; fi
 else
   if ! grep -q 'iommu=pt' /etc/default/grub; then
-    ask "Add '$IOMMU_OPTS' to GRUB?" && sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 $IOMMU_OPTS\"/" /etc/default/grub
-  else
-    ok "IOMMU options already present"
-  fi
+    ask "Add IOMMU options to GRUB?" && sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT=\"\(.*\)\"/GRUB_CMDLINE_LINUX_DEFAULT=\"\1 $IOMMU_OPTS\"/" /etc/default/grub
+  else ok "IOMMU already in GRUB"; fi
 fi
 
-# Purge host NVIDIA if present
+# Purge host NVIDIA
 if [ -n "$NV_PKGS" ]; then
-  ask "Purge host NVIDIA packages now?" && { apt-get purge -y $NV_PKGS; apt-get autoremove -y; }
+  ask "Purge host NVIDIA packages?" && { apt-get purge -y $NV_PKGS; apt-get autoremove -y; }
 fi
 
-# vfio bind
-say "vfio-pci binding"
+# vfio
+say "vfio-pci"
 VFIO_CONF=/etc/modprobe.d/vfio.conf
 WANT="options vfio-pci ids=$IDS disable_vga=1"
 if ! grep -qs "ids=$IDS" "$VFIO_CONF" 2>/dev/null; then
-  echo "   Will write: $WANT"
-  if ask "Write vfio.conf and load modules?"; then
+  if ask "Write vfio.conf?"; then
     cat > "$VFIO_CONF" <<EOF
 $WANT
 softdep nouveau pre: vfio-pci
@@ -184,46 +155,78 @@ EOF
       grep -qx "$m" /etc/modules || echo "$m" >> /etc/modules
     done
     printf 'blacklist nouveau\nblacklist nvidiafb\n' > /etc/modprobe.d/blacklist-gpu-host.conf
-    ok "vfio configuration written"
+    ok "vfio written"
   fi
 else
-  ok "vfio already configured for this GPU"
+  ok "vfio already set"
 fi
 
 # initramfs
-say "initramfs"
-if ask "Rebuild initramfs and update bootloader?"; then
+if ask "Rebuild initramfs + update bootloader?"; then
   update-initramfs -u -k all
   for k in /boot/vmlinuz-*; do
     v=${k#/boot/vmlinuz-}
     [ -f "/boot/initrd.img-$v" ] || update-initramfs -c -k "$v"
   done
-  if [ -f /etc/kernel/proxmox-boot-uuids ]; then
-    proxmox-boot-tool refresh
-  else
-    update-grub
-  fi
+  if [ -f /etc/kernel/proxmox-boot-uuids ]; then proxmox-boot-tool refresh; else update-grub; fi
 fi
 
-# PCI mapping
-say "PCI mapping '$MAP_ID'"
+# mapping
+say "PCI mapping"
 SUBSYS=$(cat /sys/bus/pci/devices/$MAIN/subsystem_vendor 2>/dev/null | sed 's/0x//'):$(cat /sys/bus/pci/devices/$MAIN/subsystem_device 2>/dev/null | sed 's/0x//')
 MAP_ENTRY="id=$VGA_ID,iommugroup=$GROUP,node=$NODE,path=$GPU_SLOT,subsystem-id=$SUBSYS"
 if pvesh get /cluster/mapping/pci/$MAP_ID >/dev/null 2>&1; then
-  ask "Update existing mapping '$MAP_ID'?" && pvesh set /cluster/mapping/pci/$MAP_ID --map "$MAP_ENTRY" --description "NVIDIA GPU (all functions)"
+  ask "Update mapping '$MAP_ID'?" && pvesh set /cluster/mapping/pci/$MAP_ID --map "$MAP_ENTRY" --description "NVIDIA GPU"
 else
-  ask "Create mapping '$MAP_ID'?" && pvesh create /cluster/mapping/pci --id "$MAP_ID" --map "$MAP_ENTRY" --description "NVIDIA GPU (all functions)"
+  ask "Create mapping '$MAP_ID'?" && pvesh create /cluster/mapping/pci --id "$MAP_ID" --map "$MAP_ENTRY" --description "NVIDIA GPU"
 fi
 
-# Optional VM config
+# =============================================================================
+# OPTIONAL VM SELECTION
+# =============================================================================
+say "Attach GPU to a VM?"
+if [ -z "$VMID" ]; then
+  echo "Existing VMs:"
+  qm list | awk 'NR>1 {printf "  %s  %s\n", $1, $2}'
+  echo
+  read -r -p "Enter VMID to configure (or press Enter to skip): " VMID
+fi
+
 if [ -n "$VMID" ]; then
-  say "VM $VMID"
-  if ask "Configure VM $VMID (q35 + OVMF + ${VM_MEM}MB balloon=0 + hostpci0=mapping=$MAP_ID,pcie=1)?"; then
-    qm set "$VMID" --machine q35 --bios ovmf --memory "$VM_MEM" --balloon 0 --cpu host --hostpci0 "mapping=$MAP_ID,pcie=1" || true
-    ok "VM updated"
+  if ! qm status "$VMID" >/dev/null 2>&1; then
+    warn "VM $VMID does not exist. Skipping."
+  else
+    if ask "Set VM $VMID to q35 + OVMF + ${VM_MEM}MB balloon=0 + hostpci0=mapping=$MAP_ID,pcie=1?"; then
+      qm set "$VMID" --machine q35 --bios ovmf --memory "$VM_MEM" --balloon 0 --cpu host --hostpci0 "mapping=$MAP_ID,pcie=1" || true
+      ok "VM $VMID updated"
+    fi
   fi
+else
+  ok "Skipped VM configuration"
 fi
 
-say "Finished"
-echo "Reboot the host when ready. Local monitor goes blank after ramdisk (no iGPU) — use the web UI."
-echo "After reboot: lspci -nnk -s $GPU_SLOT  (should show vfio-pci)"
+# =============================================================================
+# FORCE ANY LEFTOVER FUNCTIONS ONTO VFIO-PCI
+# =============================================================================
+say "Verifying and forcing vfio binding"
+for f in "${FUNCS[@]}"; do
+  drv=$(basename "$(readlink -f /sys/bus/pci/devices/$f/driver 2>/dev/null)" 2>/dev/null || echo none)
+  if [ "$drv" != "vfio-pci" ]; then
+    warn "$f is using $drv — forcing to vfio-pci"
+    echo "$f" > /sys/bus/pci/drivers/$drv/unbind 2>/dev/null || true
+    echo "$f" > /sys/bus/pci/drivers/vfio-pci/bind 2>/dev/null || true
+    sleep 0.5
+    newdrv=$(basename "$(readlink -f /sys/bus/pci/devices/$f/driver 2>/dev/null)" 2>/dev/null || echo none)
+    if [ "$newdrv" = "vfio-pci" ]; then
+      ok "$f now on vfio-pci"
+    else
+      fail "$f still on $newdrv"
+    fi
+  else
+    ok "$f already on vfio-pci"
+  fi
+done
+
+say "Done"
+echo "Reboot when ready. Local screen goes blank after ramdisk (no iGPU) — use the web UI."
+echo "After reboot: lspci -nnk -s $GPU_SLOT   (should show vfio-pci on all functions)"
