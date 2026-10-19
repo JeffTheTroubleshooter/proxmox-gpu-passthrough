@@ -1,20 +1,26 @@
 #!/usr/bin/env bash
 # =============================================================================
 # setup-gpu-passthrough.sh  -  Proxmox VE GPU passthrough
-# Pre-checks first, then asks to continue, then optionally pick a VM.
+# Pre-checks first. Asks to continue or remove passthrough.
 # Forces any leftover GPU functions onto vfio-pci.
 # Never reboots.
+#
+# Usage:
+#   bash setup-gpu-passthrough.sh            # setup (asks for VM)
+#   bash setup-gpu-passthrough.sh --remove   # remove GPU from VM + delete mapping
+#   bash setup-gpu-passthrough.sh --check    # checks only
 # =============================================================================
 set -euo pipefail
 
-CHECK_ONLY=0; FORCE=0; VMID=""; MAP_ID="${MAP_ID:-GPU}"; VM_MEM="${VM_MEM:-4096}"
+CHECK_ONLY=0; FORCE=0; REMOVE=0; VMID=""; MAP_ID="${MAP_ID:-GPU}"; VM_MEM="${VM_MEM:-4096}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK_ONLY=1 ;;
     --force) FORCE=1 ;;
+    --remove) REMOVE=1 ;;
     --vm) VMID="$2"; shift ;;
     --map-id) MAP_ID="$2"; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac; shift
 done
@@ -25,16 +31,45 @@ warn(){ printf '   \033[33m[WARN]\033[0m %s\n' "$*"; }
 fail(){ printf '   \033[31m[FAIL]\033[0m %s\n' "$*"; }
 ask(){ [ "$CHECK_ONLY" = 1 ] && return 1; read -r -p "   $1 [y/N] " a; [[ "$a" =~ ^[Yy] ]]; }
 
-CRITICAL=0
 [ "$(id -u)" = 0 ] || { echo "Must run as root."; exit 1; }
 command -v pveversion >/dev/null || { echo "Not a Proxmox host."; exit 1; }
 NODE=$(hostname)
+
+# =============================================================================
+# REMOVE MODE
+# =============================================================================
+if [ "$REMOVE" -eq 1 ]; then
+  say "REMOVE GPU PASSTHROUGH"
+  echo "Existing VMs:"
+  qm list | awk 'NR>1 {printf "  %s  %s\n", $1, $2}'
+  echo
+  if [ -z "$VMID" ]; then
+    read -r -p "Enter VMID to remove GPU from (or press Enter to skip VM): " VMID
+  fi
+  if [ -n "$VMID" ]; then
+    if qm status "$VMID" >/dev/null 2>&1; then
+      if ask "Remove hostpci0 from VM $VMID?"; then
+        qm set "$VMID" --delete hostpci0 2>/dev/null || true
+        ok "Removed hostpci0 from VM $VMID"
+      fi
+    else
+      warn "VM $VMID does not exist"
+    fi
+  fi
+  if ask "Delete PCI mapping '$MAP_ID'?"; then
+    pvesh delete /cluster/mapping/pci/$MAP_ID 2>/dev/null && ok "Mapping deleted" || warn "Mapping did not exist"
+  fi
+  say "Remove finished"
+  echo "Stop/start the VM if it was running. Reboot the host only if you also want to unbind vfio."
+  exit 0
+fi
 
 # =============================================================================
 # PRE-CHECKS
 # =============================================================================
 say "PRE-CHECKS (read-only)"
 
+CRITICAL=0
 CPU_VENDOR=$(awk -F: '/vendor_id/ {gsub(/ /,"",$2); print $2; exit}' /proc/cpuinfo)
 if [ "$CPU_VENDOR" = "GenuineIntel" ]; then
   IOMMU_OPTS="intel_iommu=on iommu=pt"
@@ -121,7 +156,6 @@ read -r -p "Checks done. Continue and apply changes? [y/N] " CONTINUE
 # =============================================================================
 say "Applying configuration"
 
-# IOMMU
 if [ -f /etc/kernel/cmdline ]; then
   if ! grep -q "iommu=pt" /etc/kernel/cmdline; then
     ask "Add IOMMU options to /etc/kernel/cmdline?" && sed -i "1 s/$/ $IOMMU_OPTS/" /etc/kernel/cmdline
@@ -132,12 +166,10 @@ else
   else ok "IOMMU already in GRUB"; fi
 fi
 
-# Purge host NVIDIA
 if [ -n "$NV_PKGS" ]; then
   ask "Purge host NVIDIA packages?" && { apt-get purge -y $NV_PKGS; apt-get autoremove -y; }
 fi
 
-# vfio
 say "vfio-pci"
 VFIO_CONF=/etc/modprobe.d/vfio.conf
 WANT="options vfio-pci ids=$IDS disable_vga=1"
@@ -161,7 +193,6 @@ else
   ok "vfio already set"
 fi
 
-# initramfs
 if ask "Rebuild initramfs + update bootloader?"; then
   update-initramfs -u -k all
   for k in /boot/vmlinuz-*; do
@@ -171,7 +202,6 @@ if ask "Rebuild initramfs + update bootloader?"; then
   if [ -f /etc/kernel/proxmox-boot-uuids ]; then proxmox-boot-tool refresh; else update-grub; fi
 fi
 
-# mapping
 say "PCI mapping"
 SUBSYS=$(cat /sys/bus/pci/devices/$MAIN/subsystem_vendor 2>/dev/null | sed 's/0x//'):$(cat /sys/bus/pci/devices/$MAIN/subsystem_device 2>/dev/null | sed 's/0x//')
 MAP_ENTRY="id=$VGA_ID,iommugroup=$GROUP,node=$NODE,path=$GPU_SLOT,subsystem-id=$SUBSYS"
@@ -181,9 +211,6 @@ else
   ask "Create mapping '$MAP_ID'?" && pvesh create /cluster/mapping/pci --id "$MAP_ID" --map "$MAP_ENTRY" --description "NVIDIA GPU"
 fi
 
-# =============================================================================
-# OPTIONAL VM SELECTION
-# =============================================================================
 say "Attach GPU to a VM?"
 if [ -z "$VMID" ]; then
   echo "Existing VMs:"
@@ -205,9 +232,6 @@ else
   ok "Skipped VM configuration"
 fi
 
-# =============================================================================
-# FORCE ANY LEFTOVER FUNCTIONS ONTO VFIO-PCI
-# =============================================================================
 say "Verifying and forcing vfio binding"
 for f in "${FUNCS[@]}"; do
   drv=$(basename "$(readlink -f /sys/bus/pci/devices/$f/driver 2>/dev/null)" 2>/dev/null || echo none)
