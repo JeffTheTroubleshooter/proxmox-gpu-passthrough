@@ -1,21 +1,20 @@
 # proxmox-gpu-passthrough
 
-Private backup of the GPU passthrough setup that worked on Jeffrey's Proxmox host (RTX 2060 SUPER → Ubuntu 26.04 VM "jex-server").
+Private backup of the GPU passthrough setup that worked on Jeffrey's Proxmox host (RTX 2060 SUPER → Ubuntu 26.04 VM).
 
-## Files
-
-- `setup-gpu-passthrough.sh` — Interactive host setup / rebuild script. Run with `--check` first.
-- `SETUP-GUIDE.md` — Full step-by-step guide to replicate the working configuration after a clean install, including the exact VM hardware settings from the screenshots and all lessons learned.
-
-## Quick start
-
-On a fresh Proxmox install (or to re-apply):
+**Always run the checks first** (especially before recording a video or after a clean install):
 
 ```bash
-bash setup-gpu-passthrough.sh --check
-bash setup-gpu-passthrough.sh --vm 102
+bash setup-gpu-passthrough.sh --check     # full read-only verification, exits if critical checks fail
+bash setup-gpu-passthrough.sh             # checks, then asks before every change
+bash setup-gpu-passthrough.sh --vm 102    # same + configure a VM
 ```
 
-Then follow the guest steps in SETUP-GUIDE.md.
+Critical checks that will stop the script:
+- IOMMU must already be active (VT-d / AMD-Vi enabled in BIOS + kernel parameter)
+- NVIDIA GPU must be present
+- No NVIDIA packages installed on the host
 
-See the script header and the guide for BIOS requirements, why the whole card must be passed, why the host must have no NVIDIA packages, and the kernel/initrd pitfalls we hit.
+Use `--force` only if you know why a check failed.
+
+See `SETUP-GUIDE.md` for the full manual steps and lessons learned.
