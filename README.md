@@ -77,9 +77,3 @@ After reboot the GPU returns to the default host drivers:
 - `nvidia-gpu` → UCSI
 
 <img width="1020" height="375" alt="default drivers" src="https://github.com/user-attachments/assets/c5f80694-d3a9-4d06-b03e-9affe60819a9" />
-
-## Notes
-
-- Stop the VM before running the script.
-- The host has no iGPU. Local video goes blank after the ramdisk loads. Use the web UI.
-- Passthrough VMs pin all their RAM. Keep the VM at 4 GB on this 8 GB host.
