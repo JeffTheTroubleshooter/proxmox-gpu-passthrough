@@ -24,6 +24,8 @@ once you reach this step that is shown in the picture below of the script select
 <img width="513" height="115" alt="image" src="https://github.com/user-attachments/assets/d24e6b21-1146-481a-9f0e-648d068f909b" />
 # Step 5 
 A completed configuration would look like this 
+<img width="1018" height="363" alt="image" src="https://github.com/user-attachments/assets/0fe8e7af-8329-41e5-88fa-6e797d634c3e" />
+Showing the kernel driver in use is vfio-pci
 
 # Optional Steps 
 if you wish to remove the GPU pass through configuration you can run the --remove command from the script  
