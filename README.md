@@ -1,40 +1,85 @@
 # proxmox-gpu-passthrough
 
-The Specs of my Proxmox Server 9.2.21
-Running Linux Kernel 7.0.14.24 
-Intel  i7-9700F 
-Ram 8GB
-GPU GeForce RTX 2060 SUPER
+GPU passthrough setup script for Proxmox VE.
 
-# Step 1
-Download or git clone or copy the setup-gpu-passthrough.sh
+## Hardware
 
-# Step 2 
-Make the script executable
-chmod +x name of the script or setup-gpu-passthrough.sh
+| Component | Spec |
+|-----------|------|
+| Proxmox   | 9.2.21 |
+| Kernel    | 7.0.14-24-pve |
+| CPU       | Intel i7-9700F |
+| RAM       | 8 GB |
+| GPU       | NVIDIA GeForce RTX 2060 SUPER |
 
-# Step 3
-run the --check first to see if proxmox can see the GPU this is just a read only check  
+## Quick Start
+
+### 1. Get the script
+
+```bash
+git clone https://github.com/JeffTheTroubleshooter/proxmox-gpu-passthrough.git
+cd proxmox-gpu-passthrough
+```
+
+Or download `setup-gpu-passthrough.sh` directly.
+
+### 2. Make it executable
+
+```bash
+chmod +x setup-gpu-passthrough.sh
+```
+
+### 3. Run the checks (read-only)
+
+```bash
 ./setup-gpu-passthrough.sh --check
+```
 
-# Step 4 
-Run the script and click yes to all the stops to install the requirements for the GPU passthrough.
+This verifies IOMMU, GPU detection, and that no host NVIDIA packages are installed. It changes nothing.
+
+### 4. Run the full setup
+
+```bash
 ./setup-gpu-passthrough.sh
-once you reach this step that is shown in the picture below of the script select the Virtual Machine ID you wanna add the GPU to you can also not add it to any Virtual machine and just have it enable and connect it to other virtual machine to your liking 
-<img width="513" height="115" alt="image" src="https://github.com/user-attachments/assets/d24e6b21-1146-481a-9f0e-648d068f909b" />
-# Step 5 
-A completed configuration would look like this 
-<img width="1018" height="363" alt="image" src="https://github.com/user-attachments/assets/0fe8e7af-8329-41e5-88fa-6e797d634c3e" />
-Showing the kernel driver in use is vfio-pci
+```
 
-# Optional Steps 
-if you wish to remove the GPU pass through configuration you can run the --remove command from the script  
+Answer **y** at each prompt. When it asks for a VMID, enter the ID of the VM you want to attach the GPU to (or press Enter to skip).
+
+<img width="513" height="115" alt="VM selection" src="https://github.com/user-attachments/assets/d24e6b21-1146-481a-9f0e-648d068f909b" />
+
+### 5. Reboot and verify
+
+After the script finishes, reboot the host. Then check:
+
+```bash
+lspci -nnk -s 0000:01:00
+```
+
+All GPU functions should show `Kernel driver in use: vfio-pci`.
+
+<img width="1018" height="363" alt="vfio-pci bound" src="https://github.com/user-attachments/assets/0fe8e7af-8329-41e5-88fa-6e797d634c3e" />
+
+## Remove Passthrough
+
+To fully undo the setup:
+
+```bash
 ./setup-gpu-passthrough.sh --remove
-once the removal is completed it should look like this from the image example below 
-<img width="1020" height="375" alt="image" src="https://github.com/user-attachments/assets/c5f80694-d3a9-4d06-b03e-9affe60819a9" />
-This information could be different if you have a different GPU from mine but it should still display the same you should see the folloiing Default configuration 
-nouveau → VGA
-snd_hda_intel → audio
-xhci_hcd → USB controller
-nvidia-gpu → UCSI
-if you see this configuration this is the default setting of your proxmox server 
+```
+
+This detaches the GPU from the VM, deletes the PCI mapping, removes the vfio config, and rebuilds initramfs. Reboot afterward.
+
+After reboot the GPU returns to the default host drivers:
+
+- `nouveau` → VGA
+- `snd_hda_intel` → audio
+- `xhci_hcd` → USB controller
+- `nvidia-gpu` → UCSI
+
+<img width="1020" height="375" alt="default drivers" src="https://github.com/user-attachments/assets/c5f80694-d3a9-4d06-b03e-9affe60819a9" />
+
+## Notes
+
+- Stop the VM before running the script.
+- The host has no iGPU. Local video goes blank after the ramdisk loads. Use the web UI.
+- Passthrough VMs pin all their RAM. Keep the VM at 4 GB on this 8 GB host.
