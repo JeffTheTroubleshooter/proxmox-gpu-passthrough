@@ -258,24 +258,32 @@ else
   ok "Skipped VM configuration"
 fi
 
+# =============================================================================
+# FORCE BIND (load module first)
+# =============================================================================
 say "Verifying and forcing vfio binding"
-for f in "${FUNCS[@]}"; do
-  drv=$(basename "$(readlink -f /sys/bus/pci/devices/$f/driver 2>/dev/null)" 2>/dev/null || echo none)
-  if [ "$drv" != "vfio-pci" ]; then
-    warn "$f is using $drv — forcing to vfio-pci"
-    echo "$f" > /sys/bus/pci/drivers/$drv/unbind 2>/dev/null || true
-    echo "$f" > /sys/bus/pci/drivers/vfio-pci/bind 2>/dev/null || true
-    sleep 0.5
-    newdrv=$(basename "$(readlink -f /sys/bus/pci/devices/$f/driver 2>/dev/null)" 2>/dev/null || echo none)
-    if [ "$newdrv" = "vfio-pci" ]; then
-      ok "$f now on vfio-pci"
+modprobe vfio-pci 2>/dev/null || true
+if [ ! -d /sys/bus/pci/drivers/vfio-pci ]; then
+  warn "vfio-pci module not loaded yet. Reboot first, then re-run the script or check with lspci."
+else
+  for f in "${FUNCS[@]}"; do
+    drv=$(basename "$(readlink -f /sys/bus/pci/devices/$f/driver 2>/dev/null)" 2>/dev/null || echo none)
+    if [ "$drv" != "vfio-pci" ]; then
+      warn "$f is using $drv — forcing to vfio-pci"
+      [ -d "/sys/bus/pci/drivers/$drv" ] && echo "$f" > /sys/bus/pci/drivers/$drv/unbind 2>/dev/null || true
+      echo "$f" > /sys/bus/pci/drivers/vfio-pci/bind 2>/dev/null || true
+      sleep 0.5
+      newdrv=$(basename "$(readlink -f /sys/bus/pci/devices/$f/driver 2>/dev/null)" 2>/dev/null || echo none)
+      if [ "$newdrv" = "vfio-pci" ]; then
+        ok "$f now on vfio-pci"
+      else
+        fail "$f still on $newdrv (reboot may be required)"
+      fi
     else
-      fail "$f still on $newdrv"
+      ok "$f already on vfio-pci"
     fi
-  else
-    ok "$f already on vfio-pci"
-  fi
-done
+  done
+fi
 
 say "Done"
 echo "Reboot when ready. Local screen goes blank after ramdisk (no iGPU) — use the web UI."
