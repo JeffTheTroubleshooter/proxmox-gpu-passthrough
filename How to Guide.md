@@ -18,6 +18,11 @@ run the --check first to see if proxmox can see the GPU this is just a read only
 ./setup-gpu-passthrough.sh --check
 
 # Step 4 
-Run the script once you run it click yes to all
-once you reach this step in the script select the Virtual Machine ID you wanna add the GPU to you can also not add it to any Virtual machine and just have it enable and connect it to other virtual machine to your liking 
+Run the script and click yes to all the stops to install the requirements for the GPU passthrough.
+./setup-gpu-passthrough.sh
+once you reach this step that is shown in the picture below of the script select the Virtual Machine ID you wanna add the GPU to you can also not add it to any Virtual machine and just have it enable and connect it to other virtual machine to your liking 
 <img width="513" height="115" alt="image" src="https://github.com/user-attachments/assets/d24e6b21-1146-481a-9f0e-648d068f909b" />
+
+# Optional Steps 
+if you wish to remove the GPU pass through configuration you can run the --remove command from the script  
+./setup-gpu-passthrough.sh --remove
