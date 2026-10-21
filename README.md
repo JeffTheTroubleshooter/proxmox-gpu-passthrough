@@ -57,7 +57,7 @@ lspci -nnk -s 0000:01:00
 
 All GPU functions should show `Kernel driver in use: vfio-pci`.
 
-<img width="1018" height="363" alt="vfio-pci bound" src="https://github.com/user-attachments/assets/0fe8e7af-8329-41e5-88fa-6e797d634c3e" />
+<img width="2336" height="848" alt="lrEon" src="https://github.com/user-attachments/assets/4f4e9902-3ca2-4be0-9082-302197fddd43" />
 
 ## Remove Passthrough
 
