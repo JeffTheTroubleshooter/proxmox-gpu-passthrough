@@ -2,7 +2,7 @@
 
 GPU passthrough setup script for Proxmox VE.
 
-## Hardware
+## My Hardware Specs
 
 | Component | Spec |
 |-----------|------|
