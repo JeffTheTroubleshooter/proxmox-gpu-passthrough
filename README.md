@@ -76,4 +76,6 @@ After reboot the GPU returns to the default host drivers:
 - `xhci_hcd` → USB controller
 - `nvidia-gpu` → UCSI
 
-<img width="1020" height="375" alt="default drivers" src="https://github.com/user-attachments/assets/c5f80694-d3a9-4d06-b03e-9affe60819a9" />
+<img width="2336" height="848" alt="R867x" src="https://github.com/user-attachments/assets/123980d9-f93f-477a-ad63-73b755280945" />
+
+
